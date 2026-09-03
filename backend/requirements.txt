@@ -1,7 +1,8 @@
 Flask
 flask-socketio
 simple-websocket
-eventlet
+gevent
+gevent-websocket
 sqlalchemy
 psycopg2-binary
 python-dotenv

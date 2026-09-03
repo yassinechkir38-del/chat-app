@@ -1,5 +1,5 @@
-import eventlet
-eventlet.monkey_patch()
+from gevent import monkey
+monkey.patch_all()
 
 import os
 from datetime import datetime, timedelta, timezone
@@ -31,7 +31,7 @@ MAIL_FROM = os.environ["MAIL_FROM"]
 FRONTEND_URL = os.environ["FRONTEND_URL"]
 
 app.config["SECRET_KEY"] = SECRET_KEY
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="gevent")
 
 engine = create_engine(os.environ["DATABASE_URL"])
 
