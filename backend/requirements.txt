@@ -9,3 +9,4 @@ python-dotenv
 pyjwt
 requests
 gunicorn
+packaging
