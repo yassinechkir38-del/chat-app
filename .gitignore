@@ -11,3 +11,6 @@ build/
 
 # Outils / config locale
 .vscode/
+
+# Netlify (etat local du lien vers le site)
+.netlify/

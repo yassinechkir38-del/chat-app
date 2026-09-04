@@ -1,4 +1,6 @@
-const BASE_URL = 'http://127.0.0.1:5050';
+// En developpement : le backend local. En production (npm run build) : la valeur
+// de VITE_API_URL, definie dans .env.production.
+const BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5050';
 
 export function inscrire(username, email, password) {
   return fetch(`${BASE_URL}/register`, {

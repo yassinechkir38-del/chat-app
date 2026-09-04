@@ -1,0 +1,15 @@
+# Netlify sert le resultat du build (dist/), jamais les sources.
+# Sans ce fichier, un deploiement peut uploader tout le dossier frontend/,
+# y compris l'index.html de developpement qui reference /src/main.jsx --
+# illisible par un navigateur, d'ou une page blanche.
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+# L'app React gere ses propres URL (ex: /reset-password). Sans cette regle,
+# Netlify chercherait un fichier /reset-password sur le disque et renverrait
+# une 404 : on renvoie toutes les routes vers index.html.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
