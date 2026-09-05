@@ -27,7 +27,7 @@ ouverte, dans les deux sens.
 - [x] Séance 5 — Authentification JWT sur les WebSockets + plusieurs salons distincts
 - [x] Séance 6 — Messages prives (DM) entre deux utilisateurs
 - [x] Séance 7 — Finitions : "X est en train d'ecrire...", utilisateurs en ligne (livre pendant le bonus MUI ci-dessus)
-- [ ] Séance 8 — Deploiement (nouveau service Render + nouveau site Netlify)
+- [~] Séance 8 — Deploiement : backend Render en ligne (https://chat-app-gkbm.onrender.com) ; frontend buildé, publication Netlify bloquée par les crédits épuisés du compte gratuit
 
 ## Structure du dossier chat-app/
 
