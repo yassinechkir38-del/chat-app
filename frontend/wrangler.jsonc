@@ -1,0 +1,17 @@
+{
+  // Configuration pour un deploiement en Worker "static assets" (Cloudflare).
+  // Le Worker ne fait pas tourner de code : il sert le contenu de dist/,
+  // c'est-a-dire le resultat de `npm run build`, sur le reseau Cloudflare.
+  "name": "chat-app",
+  "compatibility_date": "2026-09-05",
+  "assets": {
+    // Le dossier a servir. C'est le point critique : servir la racine du
+    // projet enverrait l'index.html de developpement, qui reference
+    // /src/main.jsx -- illisible par un navigateur (la fameuse page blanche).
+    "directory": "./dist",
+    // Equivalent natif de la regle /* -> /index.html : une URL inconnue
+    // (ex. /reset-password) renvoie index.html au lieu d'une 404, et c'est
+    // React qui decide quoi afficher.
+    "not_found_handling": "single-page-application"
+  }
+}
