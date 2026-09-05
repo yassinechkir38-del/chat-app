@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from hashlib import sha1
 from time import time
+from urllib.parse import urlparse
 
 import jwt
 import requests
@@ -38,12 +39,49 @@ FRONTEND_URL = os.environ["FRONTEND_URL"]
 # l'envoi d'images simplement desactive. Une variable dont l'absence ne doit pas
 # tuer le service est une option ; une variable sans laquelle l'app n'a aucun
 # sens (SECRET_KEY, DATABASE_URL) doit au contraire la faire crasher au demarrage.
-# .strip() : un copier-coller dans un formulaire web ramene souvent un espace
-# ou un retour a la ligne invisible. Sur un secret, cela produit une signature
-# fausse et un message d'erreur qui n'a aucun rapport avec la cause.
-CLOUDINARY_CLOUD_NAME = (os.environ.get("CLOUDINARY_CLOUD_NAME") or "").strip() or None
-CLOUDINARY_API_KEY = (os.environ.get("CLOUDINARY_API_KEY") or "").strip() or None
-CLOUDINARY_API_SECRET = (os.environ.get("CLOUDINARY_API_SECRET") or "").strip() or None
+def _depuis_url_cloudinary(brut):
+    """Extrait (cloud_name, api_key, api_secret) de la ligne fournie par Cloudinary.
+
+    Format officiel : cloudinary://<api_key>:<api_secret>@<cloud_name>
+    C'est la convention que lisent toutes les bibliotheques Cloudinary, et
+    surtout la seule valeur que le tableau de bord propose de copier en un clic.
+    Faire recopier a la main le fragment situe entre ":" et "@" est le meilleur
+    moyen de perdre un caractere -- erreur invisible, qui ne se manifeste que par
+    un "Invalid Signature" sans rapport apparent.
+
+    On tolere le prefixe "CLOUDINARY_URL=" que le tableau de bord affiche devant.
+    """
+    if not brut:
+        return None, None, None
+    brut = brut.strip()
+    if brut.startswith("CLOUDINARY_URL="):
+        brut = brut[len("CLOUDINARY_URL="):].strip()
+    adresse = urlparse(brut)
+    if adresse.scheme != "cloudinary":
+        return None, None, None
+    return adresse.hostname, adresse.username, adresse.password
+
+def _valeur(nom):
+    """Variable d'environnement nettoyee : un copier-coller dans un formulaire
+    web ramene souvent un espace ou un retour a la ligne invisible."""
+    return (os.environ.get(nom) or "").strip() or None
+
+# Deux facons de configurer, la premiere l'emporte :
+#   1. CLOUDINARY_URL, copiee telle quelle depuis le tableau de bord
+#   2. les trois variables separees, pour qui prefere les voir en clair
+CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET = _depuis_url_cloudinary(
+    _valeur("CLOUDINARY_URL")
+)
+if not CLOUDINARY_API_SECRET:
+    CLOUDINARY_CLOUD_NAME = _valeur("CLOUDINARY_CLOUD_NAME")
+    CLOUDINARY_API_KEY = _valeur("CLOUDINARY_API_KEY")
+    CLOUDINARY_API_SECRET = _valeur("CLOUDINARY_API_SECRET")
+    # Cas vecu : la ligne complete collee dans le champ du secret. Plutot que de
+    # renvoyer une erreur incomprehensible, on reconnait la forme et on l'utilise.
+    if CLOUDINARY_API_SECRET and "cloudinary://" in CLOUDINARY_API_SECRET:
+        depuis_url = _depuis_url_cloudinary(CLOUDINARY_API_SECRET)
+        if depuis_url[2]:
+            CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET = depuis_url
 CLOUDINARY_DOSSIER = "chat-app"
 
 IMAGES_ACTIVES = all([CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET])
