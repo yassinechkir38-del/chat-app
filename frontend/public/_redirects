@@ -1,0 +1,5 @@
+# Meme regle que le [[redirects]] de netlify.toml, mais dans un format compris
+# par tous les hebergeurs statiques (Cloudflare Pages, Render, Netlify...) :
+# l'app React gere ses propres URL (/reset-password), on renvoie donc toutes
+# les routes vers index.html au lieu de chercher un fichier sur le disque.
+/*    /index.html   200
