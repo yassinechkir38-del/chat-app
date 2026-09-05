@@ -3,6 +3,11 @@
   // Le Worker ne fait pas tourner de code : il sert le contenu de dist/,
   // c'est-a-dire le resultat de `npm run build`, sur le reseau Cloudflare.
   "name": "chat-app",
+  // Sans lui, `wrangler deploy` s'arrete si le jeton donne acces a
+  // plusieurs comptes : en mode automatique (CI), personne ne peut
+  // repondre a la question "lequel ?". Un ID de compte n'est pas un
+  // secret, il se versionne sans probleme.
+  "account_id": "3cca1b9ae7a0239447066356053a67d8",
   "compatibility_date": "2026-09-05",
   "assets": {
     // Le dossier a servir. C'est le point critique : servir la racine du
