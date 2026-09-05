@@ -15,8 +15,9 @@ import LogoutIcon from '@mui/icons-material/Logout';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import ReplyIcon from '@mui/icons-material/Reply';
 import CloseIcon from '@mui/icons-material/Close';
+import ImageIcon from '@mui/icons-material/Image';
 import { creerTheme } from './theme';
-import { SOCKET_URL } from './api';
+import { SOCKET_URL, redimensionner, televerserImage } from './api';
 import AuthPage from './AuthPage';
 
 const COULEURS = ['#6750A4', '#386A20', '#984061', '#006A6A', '#8B5000', '#31538A'];
@@ -72,6 +73,10 @@ function ChatApp({ token, pseudo, deconnexion }) {
   // seul : on est membre du salon ET de la conversation en meme temps, et un
   // accuse de lecture venant du salon ne doit pas polluer l'affichage du DM.
   const [lectures, setLectures] = useState({ salon: {}, prive: {} });
+  // Image choisie mais pas encore envoyee : { blob, apercu }
+  const [image, setImage] = useState(null);
+  const [envoiEnCours, setEnvoiEnCours] = useState(false);
+  const [erreurImage, setErreurImage] = useState(null);
 
   const socketRef = useRef(null);
   const finRef = useRef(null);
@@ -79,6 +84,7 @@ function ChatApp({ token, pseudo, deconnexion }) {
   const pseudoRef = useRef(pseudo);
   const enTrainDecrireRef = useRef(false);
   const timeoutFrappeRef = useRef(null);
+  const fichierRef = useRef(null);
 
   const theme = useMemo(() => creerTheme(mode), [mode]);
 
@@ -269,6 +275,31 @@ function ChatApp({ token, pseudo, deconnexion }) {
     }, 1500);
   };
 
+  const retirerImage = () => {
+    setImage((precedente) => {
+      // Une URL d'objet occupe la memoire tant qu'on ne la libere pas.
+      if (precedente) URL.revokeObjectURL(precedente.apercu);
+      return null;
+    });
+    setErreurImage(null);
+  };
+
+  const choisirImage = async (evenement) => {
+    const fichier = evenement.target.files?.[0];
+    evenement.target.value = ''; // sinon rechoisir le meme fichier ne declenche rien
+    if (!fichier) return;
+    setErreurImage(null);
+    try {
+      const blob = await redimensionner(fichier);
+      setImage((precedente) => {
+        if (precedente) URL.revokeObjectURL(precedente.apercu);
+        return { blob, apercu: URL.createObjectURL(blob) };
+      });
+    } catch (erreur) {
+      setErreurImage(erreur.message);
+    }
+  };
+
   const repondreA = (item) => {
     setReponseA({ id: item.id, pseudo: item.pseudo, texte: item.texte });
     inputRef.current?.focus();
@@ -278,16 +309,33 @@ function ChatApp({ token, pseudo, deconnexion }) {
     socketRef.current?.emit('reagir', { message_id: messageId, emoji, prive: !!dmActif });
   };
 
-  const envoyer = () => {
-    if (!texte.trim()) return;
+  const envoyer = async () => {
+    if ((!texte.trim() && !image) || envoiEnCours) return;
     const prive = !!dmActif;
-    const contenu = { texte: texte.trim(), repond_a: reponseA?.id ?? null };
+
+    // L'image part d'abord vers le stockage ; seule son URL voyage ensuite
+    // dans le message. Si l'envoi echoue, on ne poste rien et on garde le texte.
+    let imageUrl = null;
+    if (image) {
+      setEnvoiEnCours(true);
+      try {
+        imageUrl = await televerserImage(token, image.blob);
+      } catch (erreur) {
+        setErreurImage(erreur.message);
+        setEnvoiEnCours(false);
+        return;
+      }
+      setEnvoiEnCours(false);
+    }
+
+    const contenu = { texte: texte.trim(), repond_a: reponseA?.id ?? null, image_url: imageUrl };
     if (prive) {
       socketRef.current.emit('message_prive_envoye', contenu);
     } else {
       socketRef.current.emit('message_envoye', contenu);
     }
     setReponseA(null);
+    retirerImage();
     clearTimeout(timeoutFrappeRef.current);
     enTrainDecrireRef.current = false;
     socketRef.current.emit('arrete_ecrire', { prive });
@@ -296,7 +344,7 @@ function ChatApp({ token, pseudo, deconnexion }) {
 
   const messagesAffiches = dmActif
     ? messagesPrivees.map((m) => ({
-        id: m.id, pseudo: m.expediteur, texte: m.texte,
+        id: m.id, pseudo: m.expediteur, texte: m.texte, image_url: m.image_url,
         envoye_le: m.envoye_le, reactions: m.reactions, repond_a: m.repond_a,
       }))
     : messages;
@@ -497,11 +545,27 @@ function ChatApp({ token, pseudo, deconnexion }) {
                             </Box>
                           )}
 
-                          <Tooltip title={item.envoye_le ? formaterHeure(item.envoye_le) : ''} placement="left" arrow>
-                            <Typography variant="body2" sx={{ wordBreak: 'break-word', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
-                              {item.texte}
-                            </Typography>
-                          </Tooltip>
+                          {item.texte && (
+                            <Tooltip title={item.envoye_le ? formaterHeure(item.envoye_le) : ''} placement="left" arrow>
+                              <Typography variant="body2" sx={{ wordBreak: 'break-word', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
+                                {item.texte}
+                              </Typography>
+                            </Tooltip>
+                          )}
+
+                          {item.image_url && (
+                            <Box
+                              component="img"
+                              src={item.image_url}
+                              alt="image partagée"
+                              loading="lazy"
+                              onClick={() => window.open(item.image_url, '_blank', 'noopener')}
+                              sx={{
+                                display: 'block', mt: 0.5, maxWidth: 320, maxHeight: 320,
+                                borderRadius: 2, border: 1, borderColor: 'divider', cursor: 'zoom-in',
+                              }}
+                            />
+                          )}
 
                           {item.id != null && (
                             <Box
@@ -615,8 +679,54 @@ function ChatApp({ token, pseudo, deconnexion }) {
             </Box>
           )}
 
+          {(image || erreurImage) && (
+            <Box sx={{ mx: 2, mb: 0.5, display: 'flex', alignItems: 'center', gap: 1 }}>
+              {image && (
+                <Box sx={{ position: 'relative' }}>
+                  <Box
+                    component="img"
+                    src={image.apercu}
+                    alt="aperçu"
+                    sx={{ height: 64, borderRadius: 2, border: 1, borderColor: 'divider', display: 'block' }}
+                  />
+                  <IconButton
+                    size="small"
+                    onClick={retirerImage}
+                    sx={{
+                      position: 'absolute', top: -8, right: -8, p: 0.25,
+                      bgcolor: 'background.paper', border: 1, borderColor: 'divider',
+                      '&:hover': { bgcolor: 'background.paper' },
+                    }}
+                  >
+                    <CloseIcon sx={{ fontSize: 14 }} />
+                  </IconButton>
+                </Box>
+              )}
+              {image && (
+                <Typography variant="caption" color="text.secondary">
+                  {Math.round(image.blob.size / 1024)} Ko après redimensionnement
+                </Typography>
+              )}
+              {erreurImage && (
+                <Typography variant="caption" color="error">{erreurImage}</Typography>
+              )}
+            </Box>
+          )}
+
           <Box sx={{ px: 2, pb: 2, pt: 0.5 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, bgcolor: mode === 'light' ? 'grey.100' : 'grey.900', borderRadius: 3, px: 1.5 }}>
+              <input
+                type="file"
+                accept="image/*"
+                ref={fichierRef}
+                onChange={choisirImage}
+                style={{ display: 'none' }}
+              />
+              <Tooltip title="Envoyer une image" arrow>
+                <IconButton onClick={() => fichierRef.current?.click()} disabled={envoiEnCours}>
+                  <ImageIcon />
+                </IconButton>
+              </Tooltip>
               <TextField
                 fullWidth
                 multiline
@@ -635,8 +745,12 @@ function ChatApp({ token, pseudo, deconnexion }) {
                 inputRef={inputRef}
                 sx={{ py: 1 }}
               />
-              <IconButton color="primary" onClick={envoyer} disabled={!texte.trim()}>
-                <SendIcon />
+              <IconButton
+                color="primary"
+                onClick={envoyer}
+                disabled={(!texte.trim() && !image) || envoiEnCours}
+              >
+                {envoiEnCours ? <CircularProgress size={20} /> : <SendIcon />}
               </IconButton>
             </Box>
           </Box>

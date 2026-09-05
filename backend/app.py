@@ -4,6 +4,8 @@ monkey.patch_all()
 import os
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+from hashlib import sha1
+from time import time
 
 import jwt
 import requests
@@ -29,6 +31,20 @@ MAILJET_API_KEY = os.environ["MAILJET_API_KEY"]
 MAILJET_SECRET_KEY = os.environ["MAILJET_SECRET_KEY"]
 MAIL_FROM = os.environ["MAIL_FROM"]
 FRONTEND_URL = os.environ["FRONTEND_URL"]
+
+# --- Stockage des images (Cloudinary) ------------------------------------
+# Ces variables-la sont lues avec .get() et non avec des crochets, contrairement
+# a toutes les autres. Raison : sans elles l'app doit continuer de tourner, avec
+# l'envoi d'images simplement desactive. Une variable dont l'absence ne doit pas
+# tuer le service est une option ; une variable sans laquelle l'app n'a aucun
+# sens (SECRET_KEY, DATABASE_URL) doit au contraire la faire crasher au demarrage.
+CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME")
+CLOUDINARY_API_KEY = os.environ.get("CLOUDINARY_API_KEY")
+CLOUDINARY_API_SECRET = os.environ.get("CLOUDINARY_API_SECRET")
+CLOUDINARY_DOSSIER = "chat-app"
+
+IMAGES_ACTIVES = all([CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET])
+PREFIXE_IMAGE = f"https://res.cloudinary.com/{CLOUDINARY_CLOUD_NAME}/" if CLOUDINARY_CLOUD_NAME else None
 
 app.config["SECRET_KEY"] = SECRET_KEY
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="gevent")
@@ -66,6 +82,10 @@ with engine.connect() as conn:
     # apres coup : les messages deja en base gardent repond_a a NULL.
     conn.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS repond_a INTEGER"))
     conn.execute(text("ALTER TABLE messages_prives ADD COLUMN IF NOT EXISTS repond_a INTEGER"))
+    # On ne stocke que l'URL de l'image, jamais le fichier : la base sert aux
+    # donnees, le stockage objet aux fichiers.
+    conn.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_url TEXT"))
+    conn.execute(text("ALTER TABLE messages_prives ADD COLUMN IF NOT EXISTS image_url TEXT"))
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS reactions (
             id SERIAL PRIMARY KEY,
@@ -121,6 +141,17 @@ def _reactions_pour(ids, prive):
         mid: [{"emoji": e, "pseudos": p} for e, p in par_emoji.items()]
         for mid, par_emoji in par_message.items()
     }
+
+def _image_valide(url):
+    """N'accepte qu'une URL provenant de NOTRE compte de stockage.
+
+    Sans ce controle, le champ image_url accepterait n'importe quelle adresse :
+    on pourrait faire afficher une image hebergee ailleurs dans le chat, et
+    l'auteur de cette image verrait l'adresse IP de tous ceux qui la chargent.
+    """
+    if not url or not PREFIXE_IMAGE or not isinstance(url, str):
+        return None
+    return url if url.startswith(PREFIXE_IMAGE) else None
 
 def _lectures_de(salle):
     """{pseudo: id du dernier message lu} pour une salle donnee."""
@@ -277,6 +308,32 @@ def reset_password():
 
     return jsonify({"message": "Mot de passe mis a jour"})
 
+@app.route("/signature-upload", methods=["POST"])
+@token_requis
+def signature_upload(_user_id):
+    """Signe une autorisation d'envoi valable quelques minutes.
+
+    Le fichier ne transite jamais par ce serveur : il irait du navigateur vers
+    Render, puis de Render vers le stockage, pour rien -- en saturant au passage
+    la petite instance gratuite. Le backend ne fait que signer.
+
+    La signature est un sha1 des parametres tries, suivis du secret. Le secret
+    ne quitte donc jamais le serveur : le navigateur recoit une signature, pas
+    de quoi en fabriquer d'autres.
+    """
+    if not IMAGES_ACTIVES:
+        return jsonify({"erreur": "Envoi d'images non configure sur ce serveur"}), 503
+
+    horodatage = int(time())
+    a_signer = f"folder={CLOUDINARY_DOSSIER}&timestamp={horodatage}{CLOUDINARY_API_SECRET}"
+    return jsonify({
+        "cloud_name": CLOUDINARY_CLOUD_NAME,
+        "api_key": CLOUDINARY_API_KEY,
+        "folder": CLOUDINARY_DOSSIER,
+        "timestamp": horodatage,
+        "signature": sha1(a_signer.encode()).hexdigest(),
+    })
+
 @app.route("/salons", methods=["GET"])
 def lister_salons():
     return jsonify(SALONS)
@@ -331,7 +388,7 @@ def gerer_rejoindre(data):
     with engine.connect() as conn:
         resultat = conn.execute(
             text("""
-                SELECT m.id, m.pseudo, m.texte, m.envoye_le,
+                SELECT m.id, m.pseudo, m.texte, m.envoye_le, m.image_url,
                        cite.pseudo AS cite_pseudo, cite.texte AS cite_texte
                 FROM messages m
                 LEFT JOIN messages cite ON cite.id = m.repond_a
@@ -386,14 +443,19 @@ def gerer_message(data):
     # au lieu de refuser le message. L'utilisateur ne perd pas ce qu'il a ecrit.
     apercu = _apercu_si_visible(infos, data.get("repond_a"), prive=False)
     repond_a = data.get("repond_a") if apercu else None
+    image_url = _image_valide(data.get("image_url"))
+    texte = (data.get("texte") or "").strip()
+    if not texte and not image_url:  # un message vide n'a rien a faire en base
+        return
 
     with engine.connect() as conn:
         resultat = conn.execute(
             text("""
-                INSERT INTO messages (pseudo, texte, salon, repond_a)
-                VALUES (:pseudo, :texte, :salon, :repond_a) RETURNING id, envoye_le
+                INSERT INTO messages (pseudo, texte, salon, repond_a, image_url)
+                VALUES (:pseudo, :texte, :salon, :repond_a, :image_url) RETURNING id, envoye_le
             """),
-            {"pseudo": infos["username"], "texte": data["texte"], "salon": infos["salon"], "repond_a": repond_a},
+            {"pseudo": infos["username"], "texte": texte, "salon": infos["salon"],
+             "repond_a": repond_a, "image_url": image_url},
         )
         message_id, envoye_le = resultat.fetchone()
         conn.commit()
@@ -402,10 +464,11 @@ def gerer_message(data):
         {
             "id": message_id,
             "pseudo": infos["username"],
-            "texte": data["texte"],
+            "texte": texte,
             "envoye_le": envoye_le.isoformat(),
             "reactions": [],
             "repond_a": apercu,
+            "image_url": image_url,
         },
         to=infos["salon"],
     )
@@ -431,7 +494,7 @@ def gerer_rejoindre_conversation(data):
     with engine.connect() as conn:
         resultat = conn.execute(
             text("""
-                SELECT m.id, m.expediteur, m.destinataire, m.texte, m.envoye_le,
+                SELECT m.id, m.expediteur, m.destinataire, m.texte, m.envoye_le, m.image_url,
                        cite.expediteur AS cite_pseudo, cite.texte AS cite_texte
                 FROM messages_prives m
                 LEFT JOIN messages_prives cite ON cite.id = m.repond_a
@@ -454,14 +517,18 @@ def gerer_message_prive(data):
     autre = infos["conversation_avec"]
     apercu = _apercu_si_visible(infos, data.get("repond_a"), prive=True)
     repond_a = data.get("repond_a") if apercu else None
+    image_url = _image_valide(data.get("image_url"))
+    texte = (data.get("texte") or "").strip()
+    if not texte and not image_url:
+        return
 
     with engine.connect() as conn:
         resultat = conn.execute(
             text("""
-                INSERT INTO messages_prives (expediteur, destinataire, texte, repond_a)
-                VALUES (:e, :d, :t, :r) RETURNING id, envoye_le
+                INSERT INTO messages_prives (expediteur, destinataire, texte, repond_a, image_url)
+                VALUES (:e, :d, :t, :r, :img) RETURNING id, envoye_le
             """),
-            {"e": infos["username"], "d": autre, "t": data["texte"], "r": repond_a},
+            {"e": infos["username"], "d": autre, "t": texte, "r": repond_a, "img": image_url},
         )
         message_id, envoye_le = resultat.fetchone()
         conn.commit()
@@ -471,10 +538,11 @@ def gerer_message_prive(data):
             "id": message_id,
             "expediteur": infos["username"],
             "destinataire": autre,
-            "texte": data["texte"],
+            "texte": texte,
             "envoye_le": envoye_le.isoformat(),
             "reactions": [],
             "repond_a": apercu,
+            "image_url": image_url,
         },
         to=infos["conversation"],
     )

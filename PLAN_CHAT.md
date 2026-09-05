@@ -34,7 +34,7 @@ ouverte, dans les deux sens.
 - [x] Séance 9 — Réactions emoji + « en train d'écrire » dans les messages privés
 - [x] Séance 10 — Répondre à un message (citation)
 - [x] Séance 11 — Accusés de lecture (« Vu »)
-- [ ] Séance 12 — Envoi d'images (stockage objet Cloudflare R2)
+- [~] Séance 12 — Envoi d'images (Cloudinary) : code livré, en attente de la configuration du compte
 
 ## Structure du dossier chat-app/
 
