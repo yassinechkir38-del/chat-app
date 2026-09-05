@@ -35,6 +35,7 @@ ouverte, dans les deux sens.
 - [x] Séance 10 — Répondre à un message (citation)
 - [x] Séance 11 — Accusés de lecture (« Vu »)
 - [x] Séance 12 — Envoi d'images : redimensionnement dans le navigateur, upload signé vers Cloudinary
+- [x] Séance 13 — Premiers tests (pytest) et intégration continue (GitHub Actions)
 
 ## Structure du dossier chat-app/
 
