@@ -29,6 +29,13 @@ ouverte, dans les deux sens.
 - [x] Séance 7 — Finitions : "X est en train d'ecrire...", utilisateurs en ligne (livre pendant le bonus MUI ci-dessus)
 - [x] Séance 8 — Deploiement : backend sur Render (https://chat-app-gkbm.onrender.com), frontend sur Cloudflare Workers (https://chat-app.yassinechkir38.workers.dev)
 
+### Suite — fonctionnalités façon Messenger
+
+- [x] Séance 9 — Réactions emoji + « en train d'écrire » dans les messages privés
+- [ ] Séance 10 — Répondre à un message (citation)
+- [ ] Séance 11 — Accusés de lecture (« Vu »)
+- [ ] Séance 12 — Envoi d'images (stockage objet Cloudflare R2)
+
 ## Structure du dossier chat-app/
 
 ```

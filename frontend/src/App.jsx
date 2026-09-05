@@ -19,6 +19,9 @@ import AuthPage from './AuthPage';
 
 const COULEURS = ['#6750A4', '#386A20', '#984061', '#006A6A', '#8B5000', '#31538A'];
 const SALONS = ['general', 'aleatoire', 'aide'];
+// Doit correspondre a la liste blanche EMOJIS du backend : une reaction
+// hors de cette liste est ignoree par le serveur.
+const EMOJIS = ['\u{1F44D}', '❤️', '\u{1F602}', '\u{1F62E}', '\u{1F622}'];
 
 function couleurPour(pseudo) {
   let somme = 0;
@@ -118,8 +121,17 @@ function ChatApp({ token, pseudo, deconnexion }) {
 
     socket.on('utilisateurs_en_ligne', (liste) => setEnLigne(liste));
 
-    socket.on('quelquun_ecrit', ({ pseudo: p }) => {
-      setQuiEcrit((prev) => ({ ...prev, [p]: Date.now() }));
+    socket.on('quelquun_ecrit', ({ pseudo: p, prive }) => {
+      setQuiEcrit((prev) => ({ ...prev, [p]: { t: Date.now(), prive: !!prive } }));
+    });
+
+    // Une reaction a bouge : on remplace la liste des reactions du message
+    // concerne, sans toucher au reste de la conversation.
+    socket.on('reactions_maj', ({ message_id, prive, reactions }) => {
+      const remplacer = (liste) =>
+        liste.map((m) => (m.id === message_id ? { ...m, reactions } : m));
+      if (prive) setMessagesPrivees(remplacer);
+      else setMessages(remplacer);
     });
 
     socket.on('plus_personne_ecrit', ({ pseudo: p }) => {
@@ -147,6 +159,7 @@ function ChatApp({ token, pseudo, deconnexion }) {
     if (avec === pseudo) return;
     setCharge(false);
     setMessagesPrivees([]);
+    setQuiEcrit({});
     setDmActif(avec);
     socketRef.current.emit('rejoindre_conversation', { avec });
   };
@@ -155,6 +168,7 @@ function ChatApp({ token, pseudo, deconnexion }) {
     setDmActif(null);
     setCharge(false);
     setMessages([]);
+    setQuiEcrit({});
     socketRef.current.emit('rejoindre_salon', { salon: salonActif });
   };
 
@@ -163,8 +177,8 @@ function ChatApp({ token, pseudo, deconnexion }) {
       setQuiEcrit((prev) => {
         const maintenant = Date.now();
         const copie = {};
-        for (const [p, t] of Object.entries(prev)) {
-          if (maintenant - t < 3000) copie[p] = t;
+        for (const [p, infos] of Object.entries(prev)) {
+          if (maintenant - infos.t < 3000) copie[p] = infos;
         }
         return copie;
       });
@@ -202,33 +216,43 @@ function ChatApp({ token, pseudo, deconnexion }) {
 
   const gererFrappe = (valeur) => {
     setTexte(valeur);
-    if (dmActif) return;
+    // `prive` dit au serveur ou envoyer l'indicateur : la conversation privee
+    // ou le salon. Lui ne peut pas le deviner, on reste membre des deux.
+    const prive = !!dmActif;
     if (!enTrainDecrireRef.current) {
       enTrainDecrireRef.current = true;
-      socketRef.current.emit('en_train_ecrire');
+      socketRef.current.emit('en_train_ecrire', { prive });
     }
     clearTimeout(timeoutFrappeRef.current);
     timeoutFrappeRef.current = setTimeout(() => {
       enTrainDecrireRef.current = false;
-      socketRef.current.emit('arrete_ecrire');
+      socketRef.current.emit('arrete_ecrire', { prive });
     }, 1500);
+  };
+
+  const reagir = (messageId, emoji) => {
+    socketRef.current?.emit('reagir', { message_id: messageId, emoji, prive: !!dmActif });
   };
 
   const envoyer = () => {
     if (!texte.trim()) return;
-    if (dmActif) {
+    const prive = !!dmActif;
+    if (prive) {
       socketRef.current.emit('message_prive_envoye', { texte: texte.trim() });
     } else {
       socketRef.current.emit('message_envoye', { texte: texte.trim() });
-      clearTimeout(timeoutFrappeRef.current);
-      enTrainDecrireRef.current = false;
-      socketRef.current.emit('arrete_ecrire');
     }
+    clearTimeout(timeoutFrappeRef.current);
+    enTrainDecrireRef.current = false;
+    socketRef.current.emit('arrete_ecrire', { prive });
     setTexte('');
   };
 
   const messagesAffiches = dmActif
-    ? messagesPrivees.map((m) => ({ pseudo: m.expediteur, texte: m.texte, envoye_le: m.envoye_le }))
+    ? messagesPrivees.map((m) => ({
+        id: m.id, pseudo: m.expediteur, texte: m.texte,
+        envoye_le: m.envoye_le, reactions: m.reactions,
+      }))
     : messages;
 
   const groupes = [];
@@ -245,7 +269,11 @@ function ChatApp({ token, pseudo, deconnexion }) {
     }
   }
 
-  const autresQuiEcrivent = Object.keys(quiEcrit).filter((p) => p !== pseudo);
+  // On n'affiche que les gens qui ecrivent la ou on regarde : quelqu'un qui
+  // tape dans #general ne doit pas apparaitre pendant qu'on lit un DM.
+  const autresQuiEcrivent = Object.entries(quiEcrit)
+    .filter(([p, infos]) => p !== pseudo && infos.prive === !!dmActif)
+    .map(([p]) => p);
 
   return (
     <ThemeProvider theme={theme}>
@@ -384,11 +412,71 @@ function ChatApp({ token, pseudo, deconnexion }) {
                         )}
                       </Box>
                       {g.items.map((item, j) => (
-                        <Tooltip key={j} title={item.envoye_le ? formaterHeure(item.envoye_le) : ''} placement="left" arrow>
-                          <Typography variant="body2" sx={{ wordBreak: 'break-word', lineHeight: 1.6, width: 'fit-content', whiteSpace: 'pre-wrap' }}>
-                            {item.texte}
-                          </Typography>
-                        </Tooltip>
+                        <Box
+                          key={item.id ?? j}
+                          sx={{
+                            position: 'relative',
+                            width: 'fit-content',
+                            maxWidth: '100%',
+                            // La barre d'emojis n'apparait qu'au survol du message,
+                            // pilotee en CSS : pas d'etat React par message.
+                            '&:hover .barre-emoji': { opacity: 1, pointerEvents: 'auto' },
+                          }}
+                        >
+                          <Tooltip title={item.envoye_le ? formaterHeure(item.envoye_le) : ''} placement="left" arrow>
+                            <Typography variant="body2" sx={{ wordBreak: 'break-word', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
+                              {item.texte}
+                            </Typography>
+                          </Tooltip>
+
+                          {item.id != null && (
+                            <Box
+                              className="barre-emoji"
+                              sx={{
+                                position: 'absolute', top: -16, right: -8, zIndex: 2,
+                                display: 'flex', gap: 0.25, px: 0.5, py: 0.25,
+                                borderRadius: 3, border: 1, borderColor: 'divider',
+                                bgcolor: 'background.paper', boxShadow: 2,
+                                opacity: 0, pointerEvents: 'none', transition: 'opacity .12s',
+                              }}
+                            >
+                              {EMOJIS.map((e) => (
+                                <Box
+                                  key={e}
+                                  component="span"
+                                  onClick={() => reagir(item.id, e)}
+                                  sx={{
+                                    cursor: 'pointer', fontSize: 15, lineHeight: 1.4, px: 0.3,
+                                    transition: 'transform .1s', '&:hover': { transform: 'scale(1.3)' },
+                                  }}
+                                >
+                                  {e}
+                                </Box>
+                              ))}
+                            </Box>
+                          )}
+
+                          {item.reactions?.length > 0 && (
+                            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 0.25 }}>
+                              {item.reactions.map((r) => (
+                                <Tooltip key={r.emoji} title={r.pseudos.join(', ')} arrow>
+                                  <Box
+                                    onClick={() => reagir(item.id, r.emoji)}
+                                    sx={{
+                                      cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 0.4,
+                                      px: 0.75, py: 0.15, borderRadius: 3, border: 1, fontSize: 13, lineHeight: 1.4,
+                                      borderColor: r.pseudos.includes(pseudo) ? 'primary.main' : 'divider',
+                                      bgcolor: r.pseudos.includes(pseudo) ? 'action.selected' : 'transparent',
+                                    }}
+                                  >
+                                    <span>{r.emoji}</span>
+                                    <Typography variant="caption" color="text.secondary">{r.pseudos.length}</Typography>
+                                  </Box>
+                                </Tooltip>
+                              ))}
+                            </Box>
+                          )}
+                        </Box>
                       ))}
                     </Box>
                   </Box>
@@ -399,7 +487,7 @@ function ChatApp({ token, pseudo, deconnexion }) {
           </Box>
 
           <Box sx={{ px: 2, height: 22 }}>
-            <Fade in={!dmActif && autresQuiEcrivent.length > 0}>
+            <Fade in={autresQuiEcrivent.length > 0}>
               <Typography variant="caption" color="text.secondary" fontStyle="italic">
                 {autresQuiEcrivent.join(', ')} {autresQuiEcrivent.length > 1 ? 'sont' : 'est'} en train d'écrire...
               </Typography>

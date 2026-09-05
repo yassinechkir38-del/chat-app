@@ -10,7 +10,7 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit, join_room, leave_room
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 from werkzeug.security import generate_password_hash, check_password_hash
 
 load_dotenv()
@@ -62,12 +62,55 @@ with engine.connect() as conn:
             envoye_le TIMESTAMP DEFAULT NOW()
         )
     """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS reactions (
+            id SERIAL PRIMARY KEY,
+            message_id INTEGER NOT NULL,
+            prive BOOLEAN NOT NULL DEFAULT FALSE,
+            pseudo TEXT NOT NULL,
+            emoji TEXT NOT NULL,
+            UNIQUE (message_id, prive, pseudo, emoji)
+        )
+    """))
     conn.commit()
 
 def nom_conversation(a, b):
     return "dm_" + "_".join(sorted([a, b]))
 
 SALONS = ["general", "aleatoire", "aide"]
+# Liste blanche : on n'enregistre que ces cinq emojis. Sans elle, "emoji"
+# serait un champ texte libre ou n'importe qui pourrait stocker n'importe quoi.
+EMOJIS = ["👍", "❤️", "😂", "😮", "😢"]
+
+def _reactions_pour(ids, prive):
+    """Renvoie {message_id: [{"emoji": ..., "pseudos": [...]}, ...]}.
+
+    Une seule requete pour tous les messages de l'historique : une requete par
+    message ferait 30 allers-retours vers la base a chaque ouverture de salon.
+    """
+    if not ids:
+        return {}
+    requete = text(
+        "SELECT message_id, emoji, pseudo FROM reactions "
+        "WHERE prive = :prive AND message_id IN :ids ORDER BY id"
+    ).bindparams(bindparam("ids", expanding=True))
+    with engine.connect() as conn:
+        lignes = conn.execute(requete, {"prive": prive, "ids": list(ids)}).fetchall()
+
+    par_message = {}
+    for ligne in lignes:
+        par_emoji = par_message.setdefault(ligne.message_id, {})
+        par_emoji.setdefault(ligne.emoji, []).append(ligne.pseudo)
+    return {
+        mid: [{"emoji": e, "pseudos": p} for e, p in par_emoji.items()]
+        for mid, par_emoji in par_message.items()
+    }
+
+def _attacher_reactions(messages, prive):
+    reactions = _reactions_pour([m["id"] for m in messages], prive)
+    for m in messages:
+        m["reactions"] = reactions.get(m["id"], [])
+    return messages
 utilisateurs_connectes = {}  # sid -> {"username": ..., "salon": ...}
 
 # ---------- authentification (meme pattern que le todo-app) ----------
@@ -248,29 +291,46 @@ def gerer_rejoindre(data):
 
     with engine.connect() as conn:
         resultat = conn.execute(
-            text("SELECT pseudo, texte, envoye_le FROM messages WHERE salon = :s ORDER BY id DESC LIMIT 30"),
+            text("SELECT id, pseudo, texte, envoye_le FROM messages WHERE salon = :s ORDER BY id DESC LIMIT 30"),
             {"s": salon},
         )
         derniers_messages = [dict(ligne._mapping) for ligne in resultat]
     for m in derniers_messages:
         m["envoye_le"] = m["envoye_le"].isoformat()
     derniers_messages.reverse()
-    emit("historique", derniers_messages)
+    emit("historique", _attacher_reactions(derniers_messages, prive=False))
 
     emit("systeme", {"texte": f"{infos['username']} a rejoint le salon"}, to=salon, include_self=False)
     emit("utilisateurs_en_ligne", _pseudos_du_salon(salon), to=salon)
 
+def _salle_de_frappe(infos, prive):
+    """Ou envoyer l'indicateur de frappe : la conversation privee ou le salon.
+
+    Un utilisateur qui ouvre un DM reste membre de la room de son salon (il
+    continue d'en recevoir les messages). Le serveur ne peut donc pas deviner
+    ou il est en train d'ecrire : c'est le client qui le dit, via `prive`.
+    """
+    return infos.get("conversation") if prive else infos.get("salon")
+
 @socketio.on("en_train_ecrire")
-def gerer_ecriture():
+def gerer_ecriture(data=None):
     infos = utilisateurs_connectes.get(request.sid)
-    if infos and infos["salon"]:
-        emit("quelquun_ecrit", {"pseudo": infos["username"]}, to=infos["salon"], include_self=False)
+    if not infos:
+        return
+    prive = bool((data or {}).get("prive"))
+    salle = _salle_de_frappe(infos, prive)
+    if salle:
+        emit("quelquun_ecrit", {"pseudo": infos["username"], "prive": prive}, to=salle, include_self=False)
 
 @socketio.on("arrete_ecrire")
-def gerer_arret_ecriture():
+def gerer_arret_ecriture(data=None):
     infos = utilisateurs_connectes.get(request.sid)
-    if infos and infos["salon"]:
-        emit("plus_personne_ecrit", {"pseudo": infos["username"]}, to=infos["salon"], include_self=False)
+    if not infos:
+        return
+    prive = bool((data or {}).get("prive"))
+    salle = _salle_de_frappe(infos, prive)
+    if salle:
+        emit("plus_personne_ecrit", {"pseudo": infos["username"], "prive": prive}, to=salle, include_self=False)
 
 @socketio.on("message_envoye")
 def gerer_message(data):
@@ -279,14 +339,20 @@ def gerer_message(data):
         return
     with engine.connect() as conn:
         resultat = conn.execute(
-            text("INSERT INTO messages (pseudo, texte, salon) VALUES (:pseudo, :texte, :salon) RETURNING envoye_le"),
+            text("INSERT INTO messages (pseudo, texte, salon) VALUES (:pseudo, :texte, :salon) RETURNING id, envoye_le"),
             {"pseudo": infos["username"], "texte": data["texte"], "salon": infos["salon"]},
         )
-        envoye_le = resultat.fetchone()[0]
+        message_id, envoye_le = resultat.fetchone()
         conn.commit()
     emit(
         "nouveau_message",
-        {"pseudo": infos["username"], "texte": data["texte"], "envoye_le": envoye_le.isoformat()},
+        {
+            "id": message_id,
+            "pseudo": infos["username"],
+            "texte": data["texte"],
+            "envoye_le": envoye_le.isoformat(),
+            "reactions": [],
+        },
         to=infos["salon"],
     )
 
@@ -311,7 +377,7 @@ def gerer_rejoindre_conversation(data):
     with engine.connect() as conn:
         resultat = conn.execute(
             text("""
-                SELECT expediteur, destinataire, texte, envoye_le FROM messages_prives
+                SELECT id, expediteur, destinataire, texte, envoye_le FROM messages_prives
                 WHERE (expediteur = :moi AND destinataire = :autre) OR (expediteur = :autre AND destinataire = :moi)
                 ORDER BY id DESC LIMIT 30
             """),
@@ -321,7 +387,7 @@ def gerer_rejoindre_conversation(data):
     for m in derniers_messages:
         m["envoye_le"] = m["envoye_le"].isoformat()
     derniers_messages.reverse()
-    emit("historique_prive", derniers_messages)
+    emit("historique_prive", _attacher_reactions(derniers_messages, prive=True))
 
 @socketio.on("message_prive_envoye")
 def gerer_message_prive(data):
@@ -333,21 +399,94 @@ def gerer_message_prive(data):
         resultat = conn.execute(
             text("""
                 INSERT INTO messages_prives (expediteur, destinataire, texte)
-                VALUES (:e, :d, :t) RETURNING envoye_le
+                VALUES (:e, :d, :t) RETURNING id, envoye_le
             """),
             {"e": infos["username"], "d": autre, "t": data["texte"]},
         )
-        envoye_le = resultat.fetchone()[0]
+        message_id, envoye_le = resultat.fetchone()
         conn.commit()
     emit(
         "nouveau_message_prive",
         {
+            "id": message_id,
             "expediteur": infos["username"],
             "destinataire": autre,
             "texte": data["texte"],
             "envoye_le": envoye_le.isoformat(),
+            "reactions": [],
         },
         to=infos["conversation"],
+    )
+
+# ---------- reactions emoji ----------
+
+def _message_visible(infos, message_id, prive):
+    """Verifie que l'utilisateur a le droit de reagir a ce message.
+
+    Sans ce controle, n'importe qui pourrait envoyer un id au hasard et
+    reagir a un message prive entre deux autres personnes. On ne fait jamais
+    confiance a un id venu du client.
+    """
+    with engine.connect() as conn:
+        if prive:
+            if not infos.get("conversation_avec"):
+                return False
+            return conn.execute(
+                text("""
+                    SELECT 1 FROM messages_prives WHERE id = :id
+                    AND ((expediteur = :moi AND destinataire = :autre)
+                      OR (expediteur = :autre AND destinataire = :moi))
+                """),
+                {"id": message_id, "moi": infos["username"], "autre": infos["conversation_avec"]},
+            ).fetchone() is not None
+        if not infos.get("salon"):
+            return False
+        return conn.execute(
+            text("SELECT 1 FROM messages WHERE id = :id AND salon = :salon"),
+            {"id": message_id, "salon": infos["salon"]},
+        ).fetchone() is not None
+
+@socketio.on("reagir")
+def gerer_reaction(data):
+    infos = utilisateurs_connectes.get(request.sid)
+    if not infos:
+        return
+    emoji = (data or {}).get("emoji")
+    message_id = (data or {}).get("message_id")
+    prive = bool((data or {}).get("prive"))
+    if emoji not in EMOJIS or not isinstance(message_id, int):
+        return
+    if not _message_visible(infos, message_id, prive):
+        return
+
+    parametres = {"id": message_id, "prive": prive, "pseudo": infos["username"], "emoji": emoji}
+    with engine.connect() as conn:
+        # Un clic bascule : si la reaction existe deja, on l'enleve.
+        supprimees = conn.execute(
+            text("""
+                DELETE FROM reactions
+                WHERE message_id = :id AND prive = :prive AND pseudo = :pseudo AND emoji = :emoji
+            """),
+            parametres,
+        ).rowcount
+        if not supprimees:
+            conn.execute(
+                text("""
+                    INSERT INTO reactions (message_id, prive, pseudo, emoji)
+                    VALUES (:id, :prive, :pseudo, :emoji)
+                """),
+                parametres,
+            )
+        conn.commit()
+
+    emit(
+        "reactions_maj",
+        {
+            "message_id": message_id,
+            "prive": prive,
+            "reactions": _reactions_pour([message_id], prive).get(message_id, []),
+        },
+        to=_salle_de_frappe(infos, prive),  # meme regle que pour la frappe
     )
 
 if __name__ == "__main__":
