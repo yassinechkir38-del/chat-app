@@ -76,6 +76,18 @@ with engine.connect() as conn:
             UNIQUE (message_id, prive, pseudo, emoji)
         )
     """))
+    # Une ligne par personne et par salle : "jusqu'ou cette personne a lu".
+    # `salle` est le nom de la room socket.io -- "general" ou "dm_alice_bob" --
+    # ce qui fait marcher le meme mecanisme pour les salons et les DM.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS lectures (
+            pseudo TEXT NOT NULL,
+            salle TEXT NOT NULL,
+            dernier_message_id INTEGER NOT NULL,
+            maj_le TIMESTAMP DEFAULT NOW(),
+            PRIMARY KEY (pseudo, salle)
+        )
+    """))
     conn.commit()
 
 def nom_conversation(a, b):
@@ -109,6 +121,15 @@ def _reactions_pour(ids, prive):
         mid: [{"emoji": e, "pseudos": p} for e, p in par_emoji.items()]
         for mid, par_emoji in par_message.items()
     }
+
+def _lectures_de(salle):
+    """{pseudo: id du dernier message lu} pour une salle donnee."""
+    with engine.connect() as conn:
+        lignes = conn.execute(
+            text("SELECT pseudo, dernier_message_id FROM lectures WHERE salle = :salle"),
+            {"salle": salle},
+        ).fetchall()
+    return {ligne.pseudo: ligne.dernier_message_id for ligne in lignes}
 
 def _formater_message(ligne):
     """Transforme une ligne SQL en dictionnaire pret a partir sur le socket.
@@ -322,6 +343,7 @@ def gerer_rejoindre(data):
         derniers_messages = [_formater_message(ligne) for ligne in resultat]
     derniers_messages.reverse()
     emit("historique", _attacher_reactions(derniers_messages, prive=False))
+    emit("lectures", {"prive": False, "lectures": _lectures_de(salon)})
 
     emit("systeme", {"texte": f"{infos['username']} a rejoint le salon"}, to=salon, include_self=False)
     emit("utilisateurs_en_ligne", _pseudos_du_salon(salon), to=salon)
@@ -422,6 +444,7 @@ def gerer_rejoindre_conversation(data):
         derniers_messages = [_formater_message(ligne) for ligne in resultat]
     derniers_messages.reverse()
     emit("historique_prive", _attacher_reactions(derniers_messages, prive=True))
+    emit("lectures", {"prive": True, "lectures": _lectures_de(conversation)})
 
 @socketio.on("message_prive_envoye")
 def gerer_message_prive(data):
@@ -454,6 +477,44 @@ def gerer_message_prive(data):
             "repond_a": apercu,
         },
         to=infos["conversation"],
+    )
+
+# ---------- accuses de lecture ----------
+
+@socketio.on("marquer_lu")
+def gerer_lecture(data):
+    infos = utilisateurs_connectes.get(request.sid)
+    if not infos:
+        return
+    prive = bool((data or {}).get("prive"))
+    message_id = (data or {}).get("message_id")
+    salle = _salle_de_frappe(infos, prive)
+    if not salle or _apercu_si_visible(infos, message_id, prive) is None:
+        return
+
+    with engine.connect() as conn:
+        # GREATEST : un accuse de lecture ne recule jamais. Sans lui, ouvrir
+        # un vieux message ferait regresser la position deja enregistree.
+        resultat = conn.execute(
+            text("""
+                INSERT INTO lectures (pseudo, salle, dernier_message_id, maj_le)
+                VALUES (:pseudo, :salle, :message_id, NOW())
+                ON CONFLICT (pseudo, salle) DO UPDATE
+                SET dernier_message_id = GREATEST(lectures.dernier_message_id, EXCLUDED.dernier_message_id),
+                    maj_le = NOW()
+                RETURNING dernier_message_id
+            """),
+            {"pseudo": infos["username"], "salle": salle, "message_id": message_id},
+        )
+        position = resultat.scalar()
+        conn.commit()
+
+    # On diffuse la position reellement enregistree, pas celle recue : si le
+    # client etait en retard, les autres ne doivent pas voir l'accuse reculer.
+    emit(
+        "lecture_maj",
+        {"pseudo": infos["username"], "message_id": position, "prive": prive},
+        to=salle,
     )
 
 # ---------- reactions emoji ----------

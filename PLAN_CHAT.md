@@ -33,7 +33,7 @@ ouverte, dans les deux sens.
 
 - [x] Séance 9 — Réactions emoji + « en train d'écrire » dans les messages privés
 - [x] Séance 10 — Répondre à un message (citation)
-- [ ] Séance 11 — Accusés de lecture (« Vu »)
+- [x] Séance 11 — Accusés de lecture (« Vu »)
 - [ ] Séance 12 — Envoi d'images (stockage objet Cloudflare R2)
 
 ## Structure du dossier chat-app/

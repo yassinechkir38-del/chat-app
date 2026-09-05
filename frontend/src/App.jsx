@@ -68,6 +68,10 @@ function ChatApp({ token, pseudo, deconnexion }) {
   const [nonLus, setNonLus] = useState(0);
   // Message auquel on est en train de repondre : {id, pseudo, texte} ou null
   const [reponseA, setReponseA] = useState(null);
+  // Jusqu'ou chacun a lu, range par contexte. Deux seaux separes plutot qu'un
+  // seul : on est membre du salon ET de la conversation en meme temps, et un
+  // accuse de lecture venant du salon ne doit pas polluer l'affichage du DM.
+  const [lectures, setLectures] = useState({ salon: {}, prive: {} });
 
   const socketRef = useRef(null);
   const finRef = useRef(null);
@@ -124,6 +128,17 @@ function ChatApp({ token, pseudo, deconnexion }) {
     });
 
     socket.on('utilisateurs_en_ligne', (liste) => setEnLigne(liste));
+
+    // Etat complet, envoye a l'arrivee dans un salon ou une conversation
+    socket.on('lectures', ({ prive, lectures: etat }) => {
+      setLectures((prev) => ({ ...prev, [prive ? 'prive' : 'salon']: etat }));
+    });
+
+    // Une personne vient d'avancer sa position de lecture
+    socket.on('lecture_maj', ({ pseudo: p, message_id, prive }) => {
+      const cle = prive ? 'prive' : 'salon';
+      setLectures((prev) => ({ ...prev, [cle]: { ...prev[cle], [p]: message_id } }));
+    });
 
     socket.on('quelquun_ecrit', ({ pseudo: p, prive }) => {
       setQuiEcrit((prev) => ({ ...prev, [p]: { t: Date.now(), prive: !!prive } }));
@@ -192,6 +207,23 @@ function ChatApp({ token, pseudo, deconnexion }) {
     }, 1000);
     return () => clearInterval(interval);
   }, []);
+
+  // Signale au serveur jusqu'ou on a lu. Deux conditions : la conversation est
+  // ouverte, et l'onglet est visible. Marquer "lu" un message affiche dans un
+  // onglet en arriere-plan serait un mensonge -- personne ne l'a vu.
+  useEffect(() => {
+    const liste = dmActif ? messagesPrivees : messages;
+    const dernier = [...liste].reverse().find((m) => m.id != null);
+    if (!dernier) return;
+
+    const signaler = () => {
+      if (document.hidden || !socketRef.current?.connected) return;
+      socketRef.current.emit('marquer_lu', { message_id: dernier.id, prive: !!dmActif });
+    };
+    signaler();
+    document.addEventListener('visibilitychange', signaler);
+    return () => document.removeEventListener('visibilitychange', signaler);
+  }, [messages, messagesPrivees, dmActif]);
 
   useEffect(() => {
     finRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -282,6 +314,17 @@ function ChatApp({ token, pseudo, deconnexion }) {
       groupes.push({ pseudo: m.pseudo, items: [m] });
     }
   }
+
+  const lecturesActives = dmActif ? lectures.prive : lectures.salon;
+  // Un avatar ne s'affiche que sous le DERNIER message que la personne a lu,
+  // pas sous tous ceux d'avant : c'est ce qui fait avancer la pastille le long
+  // de la conversation, comme dans Messenger.
+  const lecteursDe = (id) =>
+    id == null
+      ? []
+      : Object.entries(lecturesActives)
+          .filter(([p, dernierLu]) => p !== pseudo && dernierLu === id)
+          .map(([p]) => p);
 
   // On n'affiche que les gens qui ecrivent la ou on regarde : quelqu'un qui
   // tape dans #general ne doit pas apparaitre pendant qu'on lit un DM.
@@ -515,6 +558,18 @@ function ChatApp({ token, pseudo, deconnexion }) {
                                     <span>{r.emoji}</span>
                                     <Typography variant="caption" color="text.secondary">{r.pseudos.length}</Typography>
                                   </Box>
+                                </Tooltip>
+                              ))}
+                            </Box>
+                          )}
+
+                          {lecteursDe(item.id).length > 0 && (
+                            <Box sx={{ display: 'flex', gap: 0.3, mt: 0.3 }}>
+                              {lecteursDe(item.id).map((p) => (
+                                <Tooltip key={p} title={`Vu par ${p}`} arrow>
+                                  <Avatar sx={{ width: 15, height: 15, fontSize: 9, bgcolor: couleurPour(p) }}>
+                                    {p.slice(0, 1).toUpperCase()}
+                                  </Avatar>
                                 </Tooltip>
                               ))}
                             </Box>
