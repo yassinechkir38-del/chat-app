@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from hashlib import sha1
 from time import time
-from urllib.parse import urlparse
 
 import jwt
 import requests
@@ -15,6 +14,8 @@ from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from sqlalchemy import bindparam, create_engine, text
 from werkzeug.security import generate_password_hash, check_password_hash
+
+from outils import config_cloudinary_depuis_url, image_valide, nom_conversation, salle_de_frappe
 
 load_dotenv()
 
@@ -39,28 +40,6 @@ FRONTEND_URL = os.environ["FRONTEND_URL"]
 # l'envoi d'images simplement desactive. Une variable dont l'absence ne doit pas
 # tuer le service est une option ; une variable sans laquelle l'app n'a aucun
 # sens (SECRET_KEY, DATABASE_URL) doit au contraire la faire crasher au demarrage.
-def _depuis_url_cloudinary(brut):
-    """Extrait (cloud_name, api_key, api_secret) de la ligne fournie par Cloudinary.
-
-    Format officiel : cloudinary://<api_key>:<api_secret>@<cloud_name>
-    C'est la convention que lisent toutes les bibliotheques Cloudinary, et
-    surtout la seule valeur que le tableau de bord propose de copier en un clic.
-    Faire recopier a la main le fragment situe entre ":" et "@" est le meilleur
-    moyen de perdre un caractere -- erreur invisible, qui ne se manifeste que par
-    un "Invalid Signature" sans rapport apparent.
-
-    On tolere le prefixe "CLOUDINARY_URL=" que le tableau de bord affiche devant.
-    """
-    if not brut:
-        return None, None, None
-    brut = brut.strip()
-    if brut.startswith("CLOUDINARY_URL="):
-        brut = brut[len("CLOUDINARY_URL="):].strip()
-    adresse = urlparse(brut)
-    if adresse.scheme != "cloudinary":
-        return None, None, None
-    return adresse.hostname, adresse.username, adresse.password
-
 def _valeur(nom):
     """Variable d'environnement nettoyee : un copier-coller dans un formulaire
     web ramene souvent un espace ou un retour a la ligne invisible."""
@@ -69,7 +48,7 @@ def _valeur(nom):
 # Deux facons de configurer, la premiere l'emporte :
 #   1. CLOUDINARY_URL, copiee telle quelle depuis le tableau de bord
 #   2. les trois variables separees, pour qui prefere les voir en clair
-CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET = _depuis_url_cloudinary(
+CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET = config_cloudinary_depuis_url(
     _valeur("CLOUDINARY_URL")
 )
 if not CLOUDINARY_API_SECRET:
@@ -79,7 +58,7 @@ if not CLOUDINARY_API_SECRET:
     # Cas vecu : la ligne complete collee dans le champ du secret. Plutot que de
     # renvoyer une erreur incomprehensible, on reconnait la forme et on l'utilise.
     if CLOUDINARY_API_SECRET and "cloudinary://" in CLOUDINARY_API_SECRET:
-        depuis_url = _depuis_url_cloudinary(CLOUDINARY_API_SECRET)
+        depuis_url = config_cloudinary_depuis_url(CLOUDINARY_API_SECRET)
         if depuis_url[2]:
             CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET = depuis_url
 CLOUDINARY_DOSSIER = "chat-app"
@@ -151,9 +130,6 @@ with engine.connect() as conn:
     """))
     conn.commit()
 
-def nom_conversation(a, b):
-    return "dm_" + "_".join(sorted([a, b]))
-
 SALONS = ["general", "aleatoire", "aide"]
 # Liste blanche : on n'enregistre que ces cinq emojis. Sans elle, "emoji"
 # serait un champ texte libre ou n'importe qui pourrait stocker n'importe quoi.
@@ -184,15 +160,9 @@ def _reactions_pour(ids, prive):
     }
 
 def _image_valide(url):
-    """N'accepte qu'une URL provenant de NOTRE compte de stockage.
-
-    Sans ce controle, le champ image_url accepterait n'importe quelle adresse :
-    on pourrait faire afficher une image hebergee ailleurs dans le chat, et
-    l'auteur de cette image verrait l'adresse IP de tous ceux qui la chargent.
-    """
-    if not url or not PREFIXE_IMAGE or not isinstance(url, str):
-        return None
-    return url if url.startswith(PREFIXE_IMAGE) else None
+    """Adaptation locale : la fonction pure vit dans outils.py, le prefixe du
+    compte de stockage n'est connu qu'ici."""
+    return image_valide(url, PREFIXE_IMAGE)
 
 def _lectures_de(salle):
     """{pseudo: id du dernier message lu} pour une salle donnee."""
@@ -446,22 +416,13 @@ def gerer_rejoindre(data):
     emit("systeme", {"texte": f"{infos['username']} a rejoint le salon"}, to=salon, include_self=False)
     emit("utilisateurs_en_ligne", _pseudos_du_salon(salon), to=salon)
 
-def _salle_de_frappe(infos, prive):
-    """Ou envoyer l'indicateur de frappe : la conversation privee ou le salon.
-
-    Un utilisateur qui ouvre un DM reste membre de la room de son salon (il
-    continue d'en recevoir les messages). Le serveur ne peut donc pas deviner
-    ou il est en train d'ecrire : c'est le client qui le dit, via `prive`.
-    """
-    return infos.get("conversation") if prive else infos.get("salon")
-
 @socketio.on("en_train_ecrire")
 def gerer_ecriture(data=None):
     infos = utilisateurs_connectes.get(request.sid)
     if not infos:
         return
     prive = bool((data or {}).get("prive"))
-    salle = _salle_de_frappe(infos, prive)
+    salle = salle_de_frappe(infos, prive)
     if salle:
         emit("quelquun_ecrit", {"pseudo": infos["username"], "prive": prive}, to=salle, include_self=False)
 
@@ -471,7 +432,7 @@ def gerer_arret_ecriture(data=None):
     if not infos:
         return
     prive = bool((data or {}).get("prive"))
-    salle = _salle_de_frappe(infos, prive)
+    salle = salle_de_frappe(infos, prive)
     if salle:
         emit("plus_personne_ecrit", {"pseudo": infos["username"], "prive": prive}, to=salle, include_self=False)
 
@@ -597,7 +558,7 @@ def gerer_lecture(data):
         return
     prive = bool((data or {}).get("prive"))
     message_id = (data or {}).get("message_id")
-    salle = _salle_de_frappe(infos, prive)
+    salle = salle_de_frappe(infos, prive)
     if not salle or _apercu_si_visible(infos, message_id, prive) is None:
         return
 
@@ -703,7 +664,7 @@ def gerer_reaction(data):
             "prive": prive,
             "reactions": _reactions_pour([message_id], prive).get(message_id, []),
         },
-        to=_salle_de_frappe(infos, prive),  # meme regle que pour la frappe
+        to=salle_de_frappe(infos, prive),  # meme regle que pour la frappe
     )
 
 if __name__ == "__main__":

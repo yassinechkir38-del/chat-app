@@ -1,0 +1,76 @@
+# Integration continue : tourne a chaque push sur main et sur chaque pull request.
+# Le but n'est pas de tout tester, mais d'empecher qu'un push manifestement
+# casse parte en production -- Cloudflare et Render deploient automatiquement.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+
+    # GitHub demarre un vrai PostgreSQL a cote du job. C'est ce qui permet aux
+    # tests d'integration de tourner : app.py cree ses tables des l'import et
+    # utilise du SQL propre a PostgreSQL, un SQLite ne suffirait pas.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: chat_test
+        ports:
+          - 5432:5432
+        # Sans ce controle de sante, les tests demarreraient avant que la base
+        # accepte les connexions -- echec aleatoire, le pire genre de rouge.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Installer les dependances
+        run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+
+      - name: Lancer les tests
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/chat_test
+        run: python -m pytest tests -q
+
+  frontend:
+    name: Frontend (lint + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Installer les dependances
+        working-directory: frontend
+        run: npm ci
+
+      - name: Verifier le style
+        working-directory: frontend
+        run: npm run lint
+
+      # Un build qui casse en local casse aussi chez Cloudflare : autant le
+      # savoir ici, avant que le deploiement automatique ne parte.
+      - name: Construire le site
+        working-directory: frontend
+        run: npm run build
