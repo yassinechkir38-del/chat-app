@@ -1,4 +1,4 @@
-# Séance 8 — Déploiement (Render + Netlify)
+# Séance 8 — Déploiement (Render + Cloudflare)
 
 ## Théorie — pourquoi le WebSocket change les regles du deploiement
 
@@ -16,11 +16,14 @@ connexions ouvertes en parallele sur un seul processus. D'ou la commande de
 demarrage :
 
 ```
-gunicorn --worker-class gevent --workers 1 app:app
+gunicorn -k geventwebsocket.gunicorn.workers.GeventWebSocketWorker -w 1 app:app
 ```
 
-- `--worker-class gevent` : le worker asynchrone (voir plus bas)
-- `--workers 1` : **un seul** worker, c'est important. Flask-SocketIO garde en
+- `-k` (`--worker-class`) : la classe de worker. Pas simplement `gevent`, mais
+  celle fournie par le paquet `gevent-websocket` — c'est elle qui sait faire
+  passer une connexion de HTTP a WebSocket. D'ou la presence de
+  `gevent-websocket` dans `requirements.txt` a cote de `gevent`.
+- `-w 1` (`--workers`) : **un seul** worker, c'est important. Flask-SocketIO garde en
   memoire la liste des clients connectes et de leurs rooms. Avec plusieurs
   workers, chaque processus aurait sa propre liste et un message envoye a un
   worker ne serait jamais vu par les clients de l'autre. Pour depasser un seul
@@ -61,7 +64,7 @@ Service Web Render, meme methode que le todo-app :
 
 - **Root Directory** : `backend`
 - **Build Command** : `pip install -r requirements.txt`
-- **Start Command** : `gunicorn --worker-class gevent --workers 1 app:app`
+- **Start Command** : `gunicorn -k geventwebsocket.gunicorn.workers.GeventWebSocketWorker -w 1 app:app`
 - **Variables d'environnement** : `DATABASE_URL` (le projet Neon du chat, pas
   celui du todo-app), `SECRET_KEY`, `MAILJET_API_KEY`, `MAILJET_SECRET_KEY`,
   `MAIL_FROM`, `FRONTEND_URL`
@@ -69,6 +72,26 @@ Service Web Render, meme methode que le todo-app :
 Toutes ces variables sont lues avec `os.environ["..."]` (crochets, pas `.get()`) :
 si l'une manque, l'app plante immediatement au demarrage avec un message clair,
 plutot que de tomber en panne plus tard sur un `None` incomprehensible.
+
+Demonstration en direct, arrivee pendant cette seance. En modifiant
+`FRONTEND_URL` dans l'interface Render, l'URL a ete ecrite dans la case de
+gauche (la **cle**) au lieu de celle de droite (la **valeur**) : la variable
+`FRONTEND_URL` a donc purement disparu. Resultat au redemarrage :
+
+```
+File "/opt/render/project/src/backend/app.py", line 31, in <module>
+    FRONTEND_URL = os.environ["FRONTEND_URL"]
+KeyError: 'FRONTEND_URL'
+==> Exited with status 1
+```
+
+Le nom exact de ce qui manque, des la premiere seconde. Avec
+`os.environ.get("FRONTEND_URL")`, l'app aurait demarre sans broncher et le
+probleme ne serait apparu que des semaines plus tard, sous la forme d'un mail
+de reinitialisation pointant vers `None/reset-password`.
+
+Et le chat n'est jamais tombe : Render garde l'ancienne instance en ligne tant
+que la nouvelle ne demarre pas correctement.
 
 `FRONTEND_URL` sert a construire le lien du mail "mot de passe oublie"
 (`{FRONTEND_URL}/reset-password?token=...`) : elle doit pointer vers l'URL
