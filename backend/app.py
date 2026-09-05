@@ -38,9 +38,12 @@ FRONTEND_URL = os.environ["FRONTEND_URL"]
 # l'envoi d'images simplement desactive. Une variable dont l'absence ne doit pas
 # tuer le service est une option ; une variable sans laquelle l'app n'a aucun
 # sens (SECRET_KEY, DATABASE_URL) doit au contraire la faire crasher au demarrage.
-CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME")
-CLOUDINARY_API_KEY = os.environ.get("CLOUDINARY_API_KEY")
-CLOUDINARY_API_SECRET = os.environ.get("CLOUDINARY_API_SECRET")
+# .strip() : un copier-coller dans un formulaire web ramene souvent un espace
+# ou un retour a la ligne invisible. Sur un secret, cela produit une signature
+# fausse et un message d'erreur qui n'a aucun rapport avec la cause.
+CLOUDINARY_CLOUD_NAME = (os.environ.get("CLOUDINARY_CLOUD_NAME") or "").strip() or None
+CLOUDINARY_API_KEY = (os.environ.get("CLOUDINARY_API_KEY") or "").strip() or None
+CLOUDINARY_API_SECRET = (os.environ.get("CLOUDINARY_API_SECRET") or "").strip() or None
 CLOUDINARY_DOSSIER = "chat-app"
 
 IMAGES_ACTIVES = all([CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET])
