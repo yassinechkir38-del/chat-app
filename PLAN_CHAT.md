@@ -32,7 +32,7 @@ ouverte, dans les deux sens.
 ### Suite — fonctionnalités façon Messenger
 
 - [x] Séance 9 — Réactions emoji + « en train d'écrire » dans les messages privés
-- [ ] Séance 10 — Répondre à un message (citation)
+- [x] Séance 10 — Répondre à un message (citation)
 - [ ] Séance 11 — Accusés de lecture (« Vu »)
 - [ ] Séance 12 — Envoi d'images (stockage objet Cloudflare R2)
 

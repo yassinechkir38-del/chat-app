@@ -62,6 +62,10 @@ with engine.connect() as conn:
             envoye_le TIMESTAMP DEFAULT NOW()
         )
     """))
+    # Une reponse pointe vers un message de la MEME table. Colonne ajoutee
+    # apres coup : les messages deja en base gardent repond_a a NULL.
+    conn.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS repond_a INTEGER"))
+    conn.execute(text("ALTER TABLE messages_prives ADD COLUMN IF NOT EXISTS repond_a INTEGER"))
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS reactions (
             id SERIAL PRIMARY KEY,
@@ -105,6 +109,20 @@ def _reactions_pour(ids, prive):
         mid: [{"emoji": e, "pseudos": p} for e, p in par_emoji.items()]
         for mid, par_emoji in par_message.items()
     }
+
+def _formater_message(ligne):
+    """Transforme une ligne SQL en dictionnaire pret a partir sur le socket.
+
+    Les deux colonnes cite_pseudo / cite_texte viennent du LEFT JOIN sur la
+    table elle-meme ; on les replie en un seul champ `repond_a`, qui vaut
+    None quand le message ne cite rien.
+    """
+    m = dict(ligne._mapping)
+    m["envoye_le"] = m["envoye_le"].isoformat()
+    cite_pseudo = m.pop("cite_pseudo", None)
+    cite_texte = m.pop("cite_texte", None)
+    m["repond_a"] = {"pseudo": cite_pseudo, "texte": cite_texte[:APERCU_MAX]} if cite_pseudo else None
+    return m
 
 def _attacher_reactions(messages, prive):
     reactions = _reactions_pour([m["id"] for m in messages], prive)
@@ -291,12 +309,17 @@ def gerer_rejoindre(data):
 
     with engine.connect() as conn:
         resultat = conn.execute(
-            text("SELECT id, pseudo, texte, envoye_le FROM messages WHERE salon = :s ORDER BY id DESC LIMIT 30"),
+            text("""
+                SELECT m.id, m.pseudo, m.texte, m.envoye_le,
+                       cite.pseudo AS cite_pseudo, cite.texte AS cite_texte
+                FROM messages m
+                LEFT JOIN messages cite ON cite.id = m.repond_a
+                WHERE m.salon = :s
+                ORDER BY m.id DESC LIMIT 30
+            """),
             {"s": salon},
         )
-        derniers_messages = [dict(ligne._mapping) for ligne in resultat]
-    for m in derniers_messages:
-        m["envoye_le"] = m["envoye_le"].isoformat()
+        derniers_messages = [_formater_message(ligne) for ligne in resultat]
     derniers_messages.reverse()
     emit("historique", _attacher_reactions(derniers_messages, prive=False))
 
@@ -337,10 +360,18 @@ def gerer_message(data):
     infos = utilisateurs_connectes.get(request.sid)
     if not infos or not infos["salon"]:
         return
+    # Citation : si l'id est invalide ou hors de portee, on ignore la citation
+    # au lieu de refuser le message. L'utilisateur ne perd pas ce qu'il a ecrit.
+    apercu = _apercu_si_visible(infos, data.get("repond_a"), prive=False)
+    repond_a = data.get("repond_a") if apercu else None
+
     with engine.connect() as conn:
         resultat = conn.execute(
-            text("INSERT INTO messages (pseudo, texte, salon) VALUES (:pseudo, :texte, :salon) RETURNING id, envoye_le"),
-            {"pseudo": infos["username"], "texte": data["texte"], "salon": infos["salon"]},
+            text("""
+                INSERT INTO messages (pseudo, texte, salon, repond_a)
+                VALUES (:pseudo, :texte, :salon, :repond_a) RETURNING id, envoye_le
+            """),
+            {"pseudo": infos["username"], "texte": data["texte"], "salon": infos["salon"], "repond_a": repond_a},
         )
         message_id, envoye_le = resultat.fetchone()
         conn.commit()
@@ -352,6 +383,7 @@ def gerer_message(data):
             "texte": data["texte"],
             "envoye_le": envoye_le.isoformat(),
             "reactions": [],
+            "repond_a": apercu,
         },
         to=infos["salon"],
     )
@@ -377,15 +409,17 @@ def gerer_rejoindre_conversation(data):
     with engine.connect() as conn:
         resultat = conn.execute(
             text("""
-                SELECT id, expediteur, destinataire, texte, envoye_le FROM messages_prives
-                WHERE (expediteur = :moi AND destinataire = :autre) OR (expediteur = :autre AND destinataire = :moi)
-                ORDER BY id DESC LIMIT 30
+                SELECT m.id, m.expediteur, m.destinataire, m.texte, m.envoye_le,
+                       cite.expediteur AS cite_pseudo, cite.texte AS cite_texte
+                FROM messages_prives m
+                LEFT JOIN messages_prives cite ON cite.id = m.repond_a
+                WHERE (m.expediteur = :moi AND m.destinataire = :autre)
+                   OR (m.expediteur = :autre AND m.destinataire = :moi)
+                ORDER BY m.id DESC LIMIT 30
             """),
             {"moi": infos["username"], "autre": autre},
         )
-        derniers_messages = [dict(ligne._mapping) for ligne in resultat]
-    for m in derniers_messages:
-        m["envoye_le"] = m["envoye_le"].isoformat()
+        derniers_messages = [_formater_message(ligne) for ligne in resultat]
     derniers_messages.reverse()
     emit("historique_prive", _attacher_reactions(derniers_messages, prive=True))
 
@@ -395,13 +429,16 @@ def gerer_message_prive(data):
     if not infos or not infos.get("conversation"):
         return
     autre = infos["conversation_avec"]
+    apercu = _apercu_si_visible(infos, data.get("repond_a"), prive=True)
+    repond_a = data.get("repond_a") if apercu else None
+
     with engine.connect() as conn:
         resultat = conn.execute(
             text("""
-                INSERT INTO messages_prives (expediteur, destinataire, texte)
-                VALUES (:e, :d, :t) RETURNING id, envoye_le
+                INSERT INTO messages_prives (expediteur, destinataire, texte, repond_a)
+                VALUES (:e, :d, :t, :r) RETURNING id, envoye_le
             """),
-            {"e": infos["username"], "d": autre, "t": data["texte"]},
+            {"e": infos["username"], "d": autre, "t": data["texte"], "r": repond_a},
         )
         message_id, envoye_le = resultat.fetchone()
         conn.commit()
@@ -414,37 +451,47 @@ def gerer_message_prive(data):
             "texte": data["texte"],
             "envoye_le": envoye_le.isoformat(),
             "reactions": [],
+            "repond_a": apercu,
         },
         to=infos["conversation"],
     )
 
 # ---------- reactions emoji ----------
 
-def _message_visible(infos, message_id, prive):
-    """Verifie que l'utilisateur a le droit de reagir a ce message.
+APERCU_MAX = 120  # on ne cite pas un roman au-dessus d'un message
 
-    Sans ce controle, n'importe qui pourrait envoyer un id au hasard et
-    reagir a un message prive entre deux autres personnes. On ne fait jamais
-    confiance a un id venu du client.
+def _apercu_si_visible(infos, message_id, prive):
+    """Renvoie {"pseudo", "texte"} si l'utilisateur a le droit de voir ce
+    message, sinon None.
+
+    Sert deux fois : pour reagir, et pour citer. Sans ce controle, n'importe
+    qui pourrait envoyer un id au hasard et atteindre un message prive entre
+    deux autres personnes. On ne fait jamais confiance a un id venu du client.
     """
+    if not isinstance(message_id, int):
+        return None
     with engine.connect() as conn:
         if prive:
             if not infos.get("conversation_avec"):
-                return False
-            return conn.execute(
+                return None
+            ligne = conn.execute(
                 text("""
-                    SELECT 1 FROM messages_prives WHERE id = :id
+                    SELECT expediteur AS pseudo, texte FROM messages_prives WHERE id = :id
                     AND ((expediteur = :moi AND destinataire = :autre)
                       OR (expediteur = :autre AND destinataire = :moi))
                 """),
                 {"id": message_id, "moi": infos["username"], "autre": infos["conversation_avec"]},
-            ).fetchone() is not None
-        if not infos.get("salon"):
-            return False
-        return conn.execute(
-            text("SELECT 1 FROM messages WHERE id = :id AND salon = :salon"),
-            {"id": message_id, "salon": infos["salon"]},
-        ).fetchone() is not None
+            ).fetchone()
+        else:
+            if not infos.get("salon"):
+                return None
+            ligne = conn.execute(
+                text("SELECT pseudo, texte FROM messages WHERE id = :id AND salon = :salon"),
+                {"id": message_id, "salon": infos["salon"]},
+            ).fetchone()
+    if ligne is None:
+        return None
+    return {"pseudo": ligne.pseudo, "texte": ligne.texte[:APERCU_MAX]}
 
 @socketio.on("reagir")
 def gerer_reaction(data):
@@ -454,9 +501,9 @@ def gerer_reaction(data):
     emoji = (data or {}).get("emoji")
     message_id = (data or {}).get("message_id")
     prive = bool((data or {}).get("prive"))
-    if emoji not in EMOJIS or not isinstance(message_id, int):
+    if emoji not in EMOJIS:
         return
-    if not _message_visible(infos, message_id, prive):
+    if _apercu_si_visible(infos, message_id, prive) is None:
         return
 
     parametres = {"id": message_id, "prive": prive, "pseudo": infos["username"], "emoji": emoji}

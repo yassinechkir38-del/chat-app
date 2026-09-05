@@ -13,6 +13,8 @@ import ForumIcon from '@mui/icons-material/Forum';
 import CircleIcon from '@mui/icons-material/Circle';
 import LogoutIcon from '@mui/icons-material/Logout';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
+import ReplyIcon from '@mui/icons-material/Reply';
+import CloseIcon from '@mui/icons-material/Close';
 import { creerTheme } from './theme';
 import { SOCKET_URL } from './api';
 import AuthPage from './AuthPage';
@@ -64,6 +66,8 @@ function ChatApp({ token, pseudo, deconnexion }) {
   const [quiEcrit, setQuiEcrit] = useState({});
   const [connecte, setConnecte] = useState(true);
   const [nonLus, setNonLus] = useState(0);
+  // Message auquel on est en train de repondre : {id, pseudo, texte} ou null
+  const [reponseA, setReponseA] = useState(null);
 
   const socketRef = useRef(null);
   const finRef = useRef(null);
@@ -152,6 +156,7 @@ function ChatApp({ token, pseudo, deconnexion }) {
     setCharge(false);
     setMessages([]);
     setQuiEcrit({});
+    setReponseA(null);
     socketRef.current.emit('rejoindre_salon', { salon: salonActif });
   }, [salonActif, dmActif]);
 
@@ -160,6 +165,7 @@ function ChatApp({ token, pseudo, deconnexion }) {
     setCharge(false);
     setMessagesPrivees([]);
     setQuiEcrit({});
+    setReponseA(null);
     setDmActif(avec);
     socketRef.current.emit('rejoindre_conversation', { avec });
   };
@@ -169,6 +175,7 @@ function ChatApp({ token, pseudo, deconnexion }) {
     setCharge(false);
     setMessages([]);
     setQuiEcrit({});
+    setReponseA(null);
     socketRef.current.emit('rejoindre_salon', { salon: salonActif });
   };
 
@@ -230,6 +237,11 @@ function ChatApp({ token, pseudo, deconnexion }) {
     }, 1500);
   };
 
+  const repondreA = (item) => {
+    setReponseA({ id: item.id, pseudo: item.pseudo, texte: item.texte });
+    inputRef.current?.focus();
+  };
+
   const reagir = (messageId, emoji) => {
     socketRef.current?.emit('reagir', { message_id: messageId, emoji, prive: !!dmActif });
   };
@@ -237,11 +249,13 @@ function ChatApp({ token, pseudo, deconnexion }) {
   const envoyer = () => {
     if (!texte.trim()) return;
     const prive = !!dmActif;
+    const contenu = { texte: texte.trim(), repond_a: reponseA?.id ?? null };
     if (prive) {
-      socketRef.current.emit('message_prive_envoye', { texte: texte.trim() });
+      socketRef.current.emit('message_prive_envoye', contenu);
     } else {
-      socketRef.current.emit('message_envoye', { texte: texte.trim() });
+      socketRef.current.emit('message_envoye', contenu);
     }
+    setReponseA(null);
     clearTimeout(timeoutFrappeRef.current);
     enTrainDecrireRef.current = false;
     socketRef.current.emit('arrete_ecrire', { prive });
@@ -251,7 +265,7 @@ function ChatApp({ token, pseudo, deconnexion }) {
   const messagesAffiches = dmActif
     ? messagesPrivees.map((m) => ({
         id: m.id, pseudo: m.expediteur, texte: m.texte,
-        envoye_le: m.envoye_le, reactions: m.reactions,
+        envoye_le: m.envoye_le, reactions: m.reactions, repond_a: m.repond_a,
       }))
     : messages;
 
@@ -423,6 +437,23 @@ function ChatApp({ token, pseudo, deconnexion }) {
                             '&:hover .barre-emoji': { opacity: 1, pointerEvents: 'auto' },
                           }}
                         >
+                          {item.repond_a && (
+                            <Box
+                              sx={{
+                                display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.25, pl: 1,
+                                borderLeft: 2, borderColor: 'divider', opacity: 0.8,
+                              }}
+                            >
+                              <ReplyIcon sx={{ fontSize: 13, transform: 'scaleX(-1)' }} color="disabled" />
+                              <Typography variant="caption" fontWeight={700} sx={{ color: couleurPour(item.repond_a.pseudo) }}>
+                                {item.repond_a.pseudo}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary" noWrap sx={{ maxWidth: 280 }}>
+                                {item.repond_a.texte}
+                              </Typography>
+                            </Box>
+                          )}
+
                           <Tooltip title={item.envoye_le ? formaterHeure(item.envoye_le) : ''} placement="left" arrow>
                             <Typography variant="body2" sx={{ wordBreak: 'break-word', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
                               {item.texte}
@@ -453,6 +484,18 @@ function ChatApp({ token, pseudo, deconnexion }) {
                                   {e}
                                 </Box>
                               ))}
+                              <Box sx={{ width: '1px', bgcolor: 'divider', mx: 0.3, my: 0.3 }} />
+                              <Box
+                                component="span"
+                                onClick={() => repondreA(item)}
+                                title="Répondre"
+                                sx={{
+                                  cursor: 'pointer', display: 'flex', alignItems: 'center', px: 0.3,
+                                  color: 'text.secondary', '&:hover': { color: 'primary.main' },
+                                }}
+                              >
+                                <ReplyIcon sx={{ fontSize: 16 }} />
+                              </Box>
                             </Box>
                           )}
 
@@ -493,6 +536,29 @@ function ChatApp({ token, pseudo, deconnexion }) {
               </Typography>
             </Fade>
           </Box>
+
+          {reponseA && (
+            <Box
+              sx={{
+                mx: 2, mb: 0.5, px: 1.5, py: 0.75, display: 'flex', alignItems: 'center', gap: 1,
+                borderRadius: 2, borderLeft: 3, borderColor: 'primary.main',
+                bgcolor: mode === 'light' ? 'grey.100' : 'grey.900',
+              }}
+            >
+              <ReplyIcon fontSize="small" color="primary" sx={{ transform: 'scaleX(-1)' }} />
+              <Box sx={{ minWidth: 0 }}>
+                <Typography variant="caption" fontWeight={700} display="block">
+                  Réponse à {reponseA.pseudo}
+                </Typography>
+                <Typography variant="caption" color="text.secondary" noWrap display="block">
+                  {reponseA.texte}
+                </Typography>
+              </Box>
+              <IconButton size="small" sx={{ ml: 'auto' }} onClick={() => setReponseA(null)}>
+                <CloseIcon fontSize="small" />
+              </IconButton>
+            </Box>
+          )}
 
           <Box sx={{ px: 2, pb: 2, pt: 0.5 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, bgcolor: mode === 'light' ? 'grey.100' : 'grey.900', borderRadius: 3, px: 1.5 }}>
