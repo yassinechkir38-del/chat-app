@@ -134,20 +134,67 @@ memoire **jusqu'a ce qu'on la libere explicitement**. Sans
 `URL.revokeObjectURL`, chaque image choisie puis annulee resterait en memoire
 pour toute la duree de la session.
 
-## Configuration (a faire dans les dashboards)
+## Configuration (a faire dans le dashboard Render)
 
-Trois variables a ajouter au service Render :
+Une seule variable suffit :
 
 | Variable | Ou la trouver |
-|---|---|
-| `CLOUDINARY_CLOUD_NAME` | tableau de bord Cloudinary, "Cloud name" |
-| `CLOUDINARY_API_KEY` | meme endroit, "API Key" |
-| `CLOUDINARY_API_SECRET` | meme endroit, "API Secret" (a reveler) |
+|----------|---------------|
+| `CLOUDINARY_URL` | tableau de bord Cloudinary, ligne "API environment variable", **bouton de copie** |
+
+Elle a la forme `cloudinary://<api_key>:<api_secret>@<cloud_name>` et le backend
+en extrait les trois valeurs lui-meme. C'est la convention officielle des
+bibliotheques Cloudinary. Les trois variables separees
+(`CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`)
+restent acceptees, mais voir ci-dessous pourquoi on ne les recommande plus.
 
 L'API Secret est un vrai secret : il ne va **que** dans les variables
 d'environnement de Render. Jamais dans le depot, jamais dans une variable
 `VITE_*` — qui finirait en clair dans le JavaScript telecharge par tout le
 monde (cf. Seance 8).
+
+## Le piege : "Invalid Signature", trois fois de suite
+
+La mise en service a echoue trois fois d'affilee, toujours avec le meme
+message renvoye par Cloudinary :
+
+```
+Invalid Signature 72bf09ff... String to sign - 'folder=chat-app&timestamp=1788612300'
+```
+
+Ce message est plus utile qu'il n'en a l'air. Cloudinary y **reconstruit la
+chaine qu'il a signee de son cote** : `folder=chat-app&timestamp=...`. Elle est
+identique a la notre. Le format, l'ordre des parametres, l'horodatage : tout
+est bon. Une seule chose peut alors differer — le secret utilise pour hacher.
+
+Le diagnostic s'est fait sans jamais regarder la valeur enregistree, en
+comparant la signature produite par le backend a celle qu'on obtiendrait avec
+diverses hypotheses :
+
+```python
+sha1((chaine + hypothese).encode()).hexdigest() == signature_du_backend
+```
+
+Reponse : la variable `CLOUDINARY_API_SECRET` contenait **la ligne entiere**
+`CLOUDINARY_URL=cloudinary://172...:psd...@svg1sjgd` au lieu du seul fragment
+situe entre `:` et `@`.
+
+Trois lecons, dans l'ordre d'importance :
+
+1. **Ne jamais faire recopier un fragment de secret a la main.** Extraire "ce
+   qui est entre les deux-points et l'arobase" est une operation qu'un humain
+   rate, et l'erreur est invisible : un caractere faux ressemble exactement a
+   un caractere juste. La solution n'a pas ete de mieux expliquer l'extraction,
+   mais de **supprimer l'extraction** — le backend lit desormais la ligne
+   complete, celle que le tableau de bord copie en un clic.
+2. **Un message d'erreur en dit souvent plus que ce qu'on y lit d'abord.** La
+   chaine a signer etait affichee des le premier echec ; elle prouvait que le
+   format etait correct et que seul le secret pouvait etre en cause. Le temps
+   perdu l'a ete a soupconner tout le reste.
+3. **Un secret peut se verifier sans jamais s'afficher.** Comparer des
+   empreintes suffit a savoir si la bonne valeur est en place. C'est aussi
+   pourquoi le mot de passe de la base a ete transmis via le presse-papiers
+   plutot qu'affiche a l'ecran.
 
 ## Exercice
 
